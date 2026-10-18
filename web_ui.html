@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Local Cursor · Multi-Agent Console</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: '#0b1120',
+            panel: '#111827',
+            edge: '#1f2937',
+          },
+          fontFamily: {
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    html, body { height: 100%; }
+    body { background: radial-gradient(1200px 600px at 50% -10%, #16233f 0%, #0b1120 55%); }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #263043; border-radius: 8px; }
+    ::-webkit-scrollbar-thumb:hover { background: #34405a; }
+    .bubble-enter { animation: pop .28s cubic-bezier(.2,.8,.3,1.2); }
+    @keyframes pop { from { opacity: 0; transform: translateY(6px) scale(.99); } to { opacity: 1; transform: none; } }
+    .pulse-dot { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+    details > summary { list-style: none; cursor: pointer; }
+    details > summary::-webkit-details-marker { display: none; }
+  </style>
+</head>
+<body class="text-slate-200 h-full">
+  <div class="h-full flex flex-col">
+
+    <!-- Header -->
+    <header class="border-b border-edge/70 bg-ink/70 backdrop-blur sticky top-0 z-20">
+      <div class="px-5 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
+        <div class="flex items-center gap-3">
+          <div class="text-2xl">🕸️</div>
+          <div>
+            <h1 class="text-lg font-semibold tracking-tight text-white">Multi-Agent Console</h1>
+            <p class="text-xs text-slate-400">Developer ↔ Reviewer · live conversational state</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <span id="statusPill" class="text-xs font-semibold px-3 py-1 rounded-full bg-slate-700 text-slate-200">idle</span>
+          <span id="connDot" class="w-2 h-2 rounded-full bg-slate-600" title="connection"></span>
+        </div>
+
+        <div class="flex items-center gap-4 text-xs text-slate-400 ml-auto">
+          <div>model <span id="hModel" class="text-cyan-300 font-mono">—</span></div>
+          <div>revision <span id="hRev" class="text-amber-300 font-mono">0</span></div>
+          <div>HEAD <span id="hHead" class="text-emerald-300 font-mono">—</span></div>
+          <div>last_good <span id="hGood" class="text-emerald-300 font-mono">—</span></div>
+        </div>
+      </div>
+      <div class="px-5 pb-3 flex items-center gap-2">
+        <div class="text-xs text-slate-400 mr-1">task</div>
+        <div id="hTask" class="text-xs text-slate-300 font-mono truncate max-w-[80ch]" title="">—</div>
+      </div>
+    </header>
+
+    <!-- Body -->
+    <main class="flex-1 min-h-0 flex">
+      <!-- Chat feed -->
+      <section class="flex-1 min-w-0 flex flex-col">
+        <div class="px-5 py-2 border-b border-edge/60 text-xs uppercase tracking-wider text-slate-500 flex items-center gap-2">
+          <span>Conversation</span><span class="flex-1 h-px bg-edge/60"></span><span id="msgCount">0 msgs</span>
+        </div>
+        <div id="feed" class="flex-1 overflow-y-auto px-5 py-5 space-y-4">
+          <div id="empty" class="h-full flex flex-col items-center justify-center text-center text-slate-500 gap-2">
+            <div class="text-4xl">💬</div>
+            <div class="text-sm">No session yet. Give the agents a new coding task below.</div>
+          </div>
+        </div>
+        <div class="border-t border-edge/70 bg-ink/80 backdrop-blur px-5 py-3">
+          <div class="flex items-end gap-2">
+            <textarea id="taskInput" rows="1" placeholder="Give the agents a new coding task…  (Enter to send, Shift+Enter for newline)"
+              class="flex-1 resize-none bg-panel border border-edge rounded-xl px-4 py-2.5 text-sm outline-none focus:border-cyan-500 placeholder:text-slate-500 max-h-40"></textarea>
+            <button id="sendBtn" class="shrink-0 text-sm font-semibold px-5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white transition disabled:opacity-40 disabled:cursor-not-allowed">Send ↵</button>
+          </div>
+          <div id="sendHint" class="text-[11px] text-slate-500 mt-1.5 h-4"></div>
+        </div>
+      </section>
+
+      <!-- Sidebar -->
+      <aside class="w-[340px] shrink-0 border-l border-edge/70 bg-panel/40 overflow-y-auto">
+        <div class="p-4 space-y-5">
+
+          <div>
+            <h2 class="text-xs uppercase tracking-wider text-slate-500 mb-3">Graph timeline</h2>
+            <ol id="nodeList" class="space-y-2"></ol>
+          </div>
+
+          <div>
+            <h2 class="text-xs uppercase tracking-wider text-slate-500 mb-3">Metrics</h2>
+            <div id="metrics" class="grid grid-cols-2 gap-2"></div>
+          </div>
+
+          <div>
+            <h2 class="text-xs uppercase tracking-wider text-slate-500 mb-3">Changed files</h2>
+            <div id="files" class="text-xs font-mono text-slate-300 space-y-1"></div>
+          </div>
+
+          <div>
+            <h2 class="text-xs uppercase tracking-wider text-slate-500 mb-3">Git status</h2>
+            <div id="gitStatus" class="text-xs font-mono text-slate-300 space-y-1"></div>
+          </div>
+
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const NODES = [
+      ['develop', 'Developer Agent', '👨‍💻'],
+      ['format',  'Black formatter', '🎨'],
+      ['lint',    'Flake8 linter',   '🧹'],
+      ['test',    'Pytest',          '🧪'],
+      ['review',  'Reviewer Agent',  '🧑‍🏫'],
+      ['commit',  'Git commit',      '📦'],
+    ];
+    const STATUS = {
+      pending: { dot: 'bg-slate-600',  text: 'text-slate-400',  ring: '',                 label: 'pending' },
+      running: { dot: 'bg-cyan-400 pulse-dot', text: 'text-cyan-300', ring: 'ring-1 ring-cyan-500/40', label: 'running' },
+      pass:    { dot: 'bg-emerald-400', text: 'text-emerald-300', ring: '',                 label: 'passed' },
+      fail:    { dot: 'bg-rose-500',    text: 'text-rose-300',    ring: '',                 label: 'failed' },
+      revise:  { dot: 'bg-amber-400',   text: 'text-amber-300',   ring: '',                 label: 'revise' },
+    };
+
+    let lastId = 0;
+    let stickBottom = true;
+    const feed = document.getElementById('feed');
+    const empty = document.getElementById('empty');
+
+    feed.addEventListener('scroll', () => {
+      stickBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+    });
+
+    function el(tag, cls, text) {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    function esc(s) { return s == null ? '' : String(s); }
+    function short(s, n) { s = esc(s); return s.length > n ? s.slice(0, n) + '…' : s; }
+
+    function scrollBottom() {
+      if (stickBottom) feed.scrollTop = feed.scrollHeight;
+    }
+
+    function addBubble(role, content, opts = {}) {
+      if (empty) empty.remove();
+      const wrap = el('div', 'bubble-enter flex gap-3 ' + (role === 'reviewer' ? 'flex-row-reverse' : ''));
+      const avatar = el('div',
+        'shrink-0 w-9 h-9 rounded-full grid place-items-center text-lg ' +
+        (role === 'developer' ? 'bg-cyan-500/20 ring-1 ring-cyan-500/40'
+         : role === 'reviewer' ? 'bg-fuchsia-500/20 ring-1 ring-fuchsia-500/40'
+         : 'bg-slate-600/30 ring-1 ring-slate-500/30'),
+        role === 'developer' ? '👨‍💻' : role === 'reviewer' ? '🧑‍🏫' : '🕸️');
+      wrap.appendChild(avatar);
+
+      const col = el('div', 'max-w-[76%] min-w-0 flex flex-col ' + (role === 'reviewer' ? 'items-end' : 'items-start'));
+      const meta = el('div', 'text-[11px] text-slate-500 mb-1 flex items-center gap-2');
+      meta.appendChild(el('span', 'font-semibold ' +
+        (role === 'developer' ? 'text-cyan-300' : role === 'reviewer' ? 'text-fuchsia-300' : 'text-slate-300'),
+        role === 'developer' ? 'Developer' : role === 'reviewer' ? 'Reviewer' : 'System'));
+      if (opts.label) meta.appendChild(el('span', 'text-amber-300/80', opts.label));
+      if (opts.revision) meta.appendChild(el('span', null, 'rev ' + opts.revision));
+      col.appendChild(meta);
+
+      const bubble = el('div',
+        'rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap break-words ' +
+        (role === 'developer' ? 'bg-cyan-500/10 ring-1 ring-cyan-500/20 rounded-tl-sm'
+         : role === 'reviewer' ? 'bg-fuchsia-500/10 ring-1 ring-fuchsia-500/20 rounded-tr-sm'
+         : 'bg-slate-600/15 ring-1 ring-slate-500/20 text-slate-300'),
+        esc(content));
+      col.appendChild(bubble);
+      wrap.appendChild(col);
+      feed.appendChild(wrap);
+      scrollBottom();
+    }
+
+    function addCard(title, body, tone) {
+      if (empty) empty.remove();
+      const tones = {
+        ok:   'border-emerald-500/40 bg-emerald-500/5',
+        fail: 'border-rose-500/40 bg-rose-500/5',
+        info: 'border-slate-600/50 bg-slate-600/5',
+        warn: 'border-amber-500/40 bg-amber-500/5',
+      };
+      const card = el('div', 'bubble-enter rounded-xl border ' + (tones[tone] || tones.info) + ' px-4 py-3');
+      const head = el('div', 'flex items-center gap-2 text-sm font-medium');
+      head.appendChild(el('span', null, title));
+      card.appendChild(head);
+      if (body) {
+        const d = el('details', 'mt-2');
+        d.appendChild(el('summary', 'text-xs text-slate-400 hover:text-slate-200', 'show output'));
+        const pre = el('pre', 'mt-2 text-xs font-mono text-slate-300 whitespace-pre-wrap break-words max-h-72 overflow-auto bg-ink/60 rounded-lg p-3', body);
+        d.appendChild(pre);
+        card.appendChild(d);
+      }
+      feed.appendChild(card);
+      scrollBottom();
+    }
+
+    function addTimeline(kind, text, tone) {
+      if (empty) empty.remove();
+      const colors = { ok: 'text-emerald-300', fail: 'text-rose-300', warn: 'text-amber-300', info: 'text-slate-300' };
+      const row = el('div', 'bubble-enter flex items-center gap-3 text-xs text-slate-400');
+      const line = el('div', 'flex-1 h-px bg-edge/70');
+      const mid = el('span', 'px-2 py-0.5 rounded-full bg-panel ring-1 ring-edge ' + (colors[tone] || colors.info),
+        kind + ' · ' + text);
+      row.appendChild(line.cloneNode()); row.appendChild(mid); row.appendChild(line);
+      feed.appendChild(row);
+      scrollBottom();
+    }
+
+    function appendEvent(ev) {
+      switch (ev.type) {
+        case 'message':
+          addBubble(ev.role, ev.content, { label: ev.label, revision: ev.revision });
+          break;
+        case 'tool_call': {
+          const badge = el('div', 'bubble-enter ml-12 flex items-center gap-2 text-xs font-mono');
+          badge.appendChild(el('span', 'px-2 py-1 rounded-md bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-500/30', '⚙ ' + ev.tool));
+          const a = JSON.stringify(ev.args || {});
+          badge.appendChild(el('span', 'text-slate-500 truncate max-w-[60ch]', short(a, 120)));
+          feed.appendChild(badge); scrollBottom();
+          break;
+        }
+        case 'tool_result': {
+          const box = el('div', 'bubble-enter ml-12');
+          const d = el('details', 'group');
+          d.appendChild(el('summary', 'text-xs text-slate-500 hover:text-slate-300 select-none',
+            (ev.ok === false ? '✗ ' : '↩ ') + short(ev.output, 90)));
+          d.appendChild(el('pre', 'mt-1 text-xs font-mono text-slate-400 whitespace-pre-wrap break-words max-h-60 overflow-auto bg-ink/50 rounded-lg p-2',
+            esc(ev.output)));
+          box.appendChild(d); feed.appendChild(box); scrollBottom();
+          break;
+        }
+        case 'dev_step':
+          addTimeline('step', `Developer thinking (${ev.step}/${ev.budget})`, 'info'); break;
+        case 'format':
+          addCard((ev.ok ? '✅' : '⚠️') + ' Black formatter ' + (ev.ok ? 'applied' : 'failed'),
+                  (ev.output || '(no changes)'), ev.ok ? 'ok' : 'warn'); break;
+        case 'lint':
+          addCard((ev.ok ? '✅' : '❌') + ' Flake8 · ' + (ev.ok ? 'clean' : 'issues found'),
+                  ev.output || '(clean)', ev.ok ? 'ok' : 'fail'); break;
+        case 'test_started':
+          addTimeline('test', 'pytest ' + (ev.targets || []).join(' '), 'info'); break;
+        case 'test':
+          addCard((ev.ok ? '✅' : '❌') + ' Pytest · ' + (ev.ok ? 'passed' : 'failed'),
+                  ev.output || '', ev.ok ? 'ok' : 'fail'); break;
+        case 'revision':
+          addTimeline('revise', 'revision ' + ev.number + ' requested', 'warn');
+          if (ev.feedback) addBubble('system', ev.feedback, { label: 'feedback to developer' });
+          break;
+        case 'commit':
+          addTimeline('commit', ev.message || 'committed', 'ok'); break;
+        case 'rollback':
+          addTimeline('rollback', ev.message || 'rolled back to last_good', 'fail'); break;
+        case 'error':
+          addCard('💥 Error', ev.error || 'unknown error', 'fail'); break;
+        case 'finished': {
+          const ok = ev.result === 'approved';
+          addTimeline('finished', ok ? 'approved & committed' : ev.result || 'done', ok ? 'ok' : 'fail');
+          break;
+        }
+        case 'node':
+          break;
+      }
+    }
+
+    function renderHeader(meta, git) {
+      const pill = document.getElementById('statusPill');
+      const st = meta.status || 'idle';
+      const styles = {
+        idle:    'bg-slate-700 text-slate-200',
+        running: 'bg-amber-500/90 text-ink',
+        done:    'bg-emerald-600 text-white',
+        error:   'bg-rose-600 text-white',
+      };
+      pill.className = 'text-xs font-semibold px-3 py-1 rounded-full ' + (styles[st] || styles.idle);
+      pill.textContent = st + (meta.result ? ' · ' + meta.result : '');
+
+      document.getElementById('hModel').textContent = meta.model || '—';
+      document.getElementById('hRev').textContent = (meta.revision || 0) + '/' + (meta.max_revisions || 0);
+      document.getElementById('hTask').textContent = meta.task || '—';
+      document.getElementById('hTask').title = meta.task || '';
+      if (git) {
+        document.getElementById('hHead').textContent = (git.head || '—').slice(0, 8);
+        document.getElementById('hGood').textContent = (git.last_good || '—').slice(0, 8);
+      }
+      document.getElementById('msgCount').textContent = (document.querySelectorAll('#feed .rounded-2xl').length) + ' msgs';
+    }
+
+    function renderNodes(nodes) {
+      const list = document.getElementById('nodeList');
+      list.innerHTML = '';
+      NODES.forEach(([key, label, icon], i) => {
+        const info = nodes[key] || { status: 'pending', note: '' };
+        const s = STATUS[info.status] || STATUS.pending;
+        const li = el('li', 'flex items-start gap-3 ' + (s.ring ? 'rounded-lg px-2 py-1 -mx-2 ' + s.ring : ''));
+        const dot = el('span', 'mt-1.5 w-2.5 h-2.5 rounded-full ' + s.dot);
+        li.appendChild(dot);
+        const col = el('div', 'min-w-0 flex-1');
+        const top = el('div', 'flex items-center gap-2');
+        top.appendChild(el('span', null, icon));
+        top.appendChild(el('span', 'text-sm ' + (info.status === 'pending' ? 'text-slate-400' : 'text-slate-100'), label));
+        top.appendChild(el('span', 'ml-auto text-[10px] uppercase tracking-wide ' + s.text, s.label));
+        col.appendChild(top);
+        if (info.note) col.appendChild(el('div', 'text-[11px] text-slate-500 truncate', info.note));
+        li.appendChild(col);
+        list.appendChild(li);
+      });
+    }
+
+    function renderMetrics(m) {
+      const box = document.getElementById('metrics');
+      box.innerHTML = '';
+      const items = [
+        ['messages', m.messages], ['tool calls', m.tool_calls], ['dev steps', m.dev_steps],
+        ['lint runs', m.lint_runs], ['test runs', m.test_runs], ['revisions', m.revisions],
+      ];
+      items.forEach(([k, v]) => {
+        const c = el('div', 'rounded-lg bg-ink/50 ring-1 ring-edge px-3 py-2');
+        c.appendChild(el('div', 'text-lg font-semibold text-white', v == null ? 0 : v));
+        c.appendChild(el('div', 'text-[10px] uppercase tracking-wide text-slate-500', k));
+        box.appendChild(c);
+      });
+      const files = document.getElementById('files');
+      files.innerHTML = '';
+      const fl = m.files_changed || [];
+      if (!fl.length) files.appendChild(el('div', 'text-slate-500', '(none)'));
+      fl.forEach(f => files.appendChild(el('div', 'truncate', '• ' + f)));
+    }
+
+    function renderGit(git) {
+      if (!git) return;
+      const box = document.getElementById('gitStatus');
+      box.innerHTML = '';
+      const status = git.status || {};
+      const keys = Object.keys(status);
+      if (!keys.length) { box.appendChild(el('div', 'text-slate-500', '(clean)')); return; }
+      keys.forEach(k => {
+        const code = String(status[k]);
+        const tone = code.includes('?') || code.startsWith('A') ? 'text-emerald-300'
+                   : code.includes('M') ? 'text-amber-300' : 'text-slate-300';
+        box.appendChild(el('div', 'truncate ' + tone, code.padEnd(2, ' ') + ' ' + k));
+      });
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch('/api/state?since=' + lastId + '&meta=1', { cache: 'no-store' });
+        const d = await r.json();
+        document.getElementById('connDot').className = 'w-2 h-2 rounded-full bg-emerald-400';
+        renderHeader(d.meta || {}, d.git || {});
+        renderNodes(d.nodes || {});
+        renderMetrics(d.metrics || {});
+        renderGit(d.git || {});
+        (d.events || []).forEach(appendEvent);
+        if(d.hitl) showHITL(d.hitl);
+        if (typeof d.last_id === 'number') lastId = d.last_id;
+        const btn = document.getElementById('runBtn');
+        btn.disabled = (d.meta && d.meta.status === 'running');
+      } catch (e) {
+        document.getElementById('connDot').className = 'w-2 h-2 rounded-full bg-rose-500';
+      }
+    }
+
+    async function submitTask(){
+      const input=document.getElementById('taskInput');
+      const task=input.value.trim();
+      const hint=document.getElementById('sendHint');
+      if(!task){ hint.textContent='Please type a task first.'; return; }
+      const btn=document.getElementById('sendBtn'); btn.disabled=true;
+      try{
+        const r=await fetch('/api/submit-task',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({task}),
+        });
+        const d=await r.json();
+        if(d.ok){
+          // clear old conversation immediately
+          const f=document.getElementById('feed');
+          f.querySelectorAll(':scope > *').forEach(n=>n.remove());
+          lastId=0;
+          input.value=''; autoGrow(input);
+          hint.textContent='Launched a fresh session. Streaming…';
+          poll();
+        } else {
+          hint.textContent = d.error || 'Could not start the task.';
+        }
+      }catch(e){ hint.textContent='Could not reach the server.'; }
+      btn.disabled=false;
+    }
+
+    function autoGrow(t){ t.style.height='auto'; t.style.height=Math.min(t.scrollHeight,160)+'px'; }
+
+    document.getElementById('sendBtn').addEventListener('click', submitTask);
+    const ti=document.getElementById('taskInput');
+    ti.addEventListener('input',()=>autoGrow(ti));
+    ti.addEventListener('keydown',e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); submitTask(); }});
+
+
+    function showHITL(hitl){
+      const modal=document.getElementById('hitlModal');
+      if(!hitl || !hitl.paused){
+        modal.classList.add('hidden');
+        return;
+      }
+      document.getElementById('hitlReason').textContent = hitl.reason || 'Reviewer rejected the code more than twice.';
+      document.getElementById('hitlMsg').textContent = 'Reject count: '+(hitl.reject_count||0)+'. Provide guidance to the Developer agent, or override to force-approve.';
+      document.getElementById('hitlGuidance').value = hitl.feedback||'';
+      modal.classList.remove('hidden');
+    }
+
+    document.getElementById('hitlApproveBtn').addEventListener('click', async ()=>{
+      try{
+        const r=await fetch('/api/hitl/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+        const d=await r.json();
+        if(!d.ok){ alert(d.error||'HITL failed'); }
+      }catch(e){ alert('HITL error'); }
+    });
+    document.getElementById('hitlGuidanceBtn').addEventListener('click', async ()=>{
+      const fb=document.getElementById('hitlGuidance').value.trim();
+      if(!fb){ alert('Please provide guidance.'); return; }
+      try{
+        const r=await fetch('/api/hitl/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb})});
+        const d=await r.json();
+        if(!d.ok){ alert(d.error||'HITL failed'); }
+        document.getElementById('hitlModal').classList.add('hidden');
+      }catch(e){ alert('HITL error'); }
+    });
+
+    poll();
+    setInterval(poll, 1000);
+  </script>
+  <div id="hitlModal" class="fixed inset-0 z-30 hidden">
+    <div class="absolute inset-0 bg-black/60"></div>
+    <div class="relative mx-auto mt-28 max-w-2xl rounded-2xl border border-edge bg-panel/95 shadow-xl">
+      <div class="px-6 py-4 border-b border-edge/70">
+        <div class="text-lg font-semibold text-white">Human-in-the-Loop Validation</div>
+        <div class="text-sm text-slate-400 mt-1" id="hitlReason">Reviewer rejected the code more than twice. Please choose an action.</div>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <div class="text-sm text-slate-300" id="hitlMsg">Provide guidance to the Developer agent, or force-approve to commit.</div>
+        <textarea id="hitlGuidance" rows="4" placeholder="Explain what to change (be specific and actionable)..."
+                  class="w-full resize-none bg-ink/60 border border-edge rounded-xl px-4 py-3 text-sm outline-none focus:border-cyan-500 placeholder:text-slate-500"></textarea>
+        <div class="flex flex-wrap gap-2 justify-end">
+          <button id="hitlApproveBtn" class="text-sm font-semibold px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition">Override &amp; Force Approve</button>
+          <button id="hitlGuidanceBtn" class="text-sm font-semibold px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition">Provide Human Guidance</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

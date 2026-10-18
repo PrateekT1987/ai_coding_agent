@@ -59,7 +59,7 @@ class Spinner:
 
 class CodingAgent:
 
-    def __init__(self, model: str = "qwen3:32b", debug: bool = False):
+    def __init__(self, model: str = "qwen2.5-coder:3b", debug: bool = False):
         """Initialize the agent."""
         self.model = model
 
@@ -137,11 +137,16 @@ class CodingAgent:
             # Add to messages history
             self.messages.append(response_message.model_dump())
             
-            # Check for tool calls
+            # Check for native tool calls
             if hasattr(response_message, 'tool_calls') and response_message.tool_calls:
                 for tool_call in response_message.tool_calls:
                     function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
+                    try:
+                        function_args = json.loads(
+                            self._repair_json_strings(tool_call.function.arguments)
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        function_args = {}
                     
                     if self.debug:
                         print(f"\n{Fore.YELLOW}DEBUG - Tool call detected: {function_name}")
@@ -161,12 +166,115 @@ class CodingAgent:
                 
                 # Continue the conversation to get the final response
                 continue
-            else:
-                # No tool calls, this is the final response
-                final_response = message_content
-                break
+            
+            # Some models (e.g. qwen2.5-coder:3b) emit tool calls as JSON text
+            # inside the message content instead of native tool_calls. Parse those.
+            parsed_tool_call = self.parse_text_tool_call(message_content)
+            if parsed_tool_call:
+                function_name, function_args = parsed_tool_call
+                
+                if self.debug:
+                    print(f"\n{Fore.YELLOW}DEBUG - Text tool call detected: {function_name}")
+                    print(f"Arguments: {json.dumps(function_args, indent=2)}")
+                
+                # Execute the tool
+                self.spinner.message = f"Using {function_name}"
+                tool_result = self.execute_tool(function_name, function_args)
+                
+                # Feed the result back and ask for a final answer
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Tool '{function_name}' returned:\n{tool_result}\n\n"
+                        "Based on that result, give the final answer. "
+                        "Do not output another tool call."
+                    )
+                })
+                continue
+            
+            # No tool calls, this is the final response
+            final_response = message_content
+            break
         
         return final_response
+    
+    @staticmethod
+    def _repair_json_strings(text: str) -> str:
+        """Escape raw newlines/tabs that appear inside JSON string values.
+
+        Small coder models often emit pretty-printed JSON where multi-line
+        string values (e.g. file ``content``) contain literal newlines, which
+        is invalid JSON and would otherwise defeat json.loads.
+        """
+        out = []
+        in_string = False
+        escaped = False
+        control_escape = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+        for ch in text:
+            if escaped:
+                out.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                out.append(ch)
+                continue
+            if in_string and ch in control_escape:
+                out.append(control_escape[ch])
+                continue
+            out.append(ch)
+        return "".join(out)
+
+    def parse_text_tool_call(self, content: str):
+        """Parse a tool call that the model emitted as JSON text."""
+        if not content:
+            return None
+        
+        text = content.strip()
+        
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.splitlines()[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        # Repair literal newlines inside JSON strings
+        text = self._repair_json_strings(text)
+        
+        # Try the whole text and the outermost JSON object
+        candidates = [text]
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            candidates.append(text[start:end + 1])
+        
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            
+            if not isinstance(data, dict) or "name" not in data:
+                continue
+            
+            function_name = data["name"]
+            function_args = data.get("arguments", data.get("parameters", {}))
+            
+            if isinstance(function_args, str):
+                try:
+                    function_args = json.loads(function_args)
+                except json.JSONDecodeError:
+                    function_args = {}
+            
+            if not isinstance(function_args, dict):
+                function_args = {}
+            
+            return function_name, function_args
+        
+        return None
     
     def get_system_prompt(self) -> str:
         return f"""You are an AI assistant that uses tools for file operations, code analysis, and commands. Give precise and concise answers.
@@ -180,6 +288,8 @@ Tool Usage Rules:
 4. Use run_command for system operations
 5. ALWAYS use web_search for any questions about current events, facts, data, or information that may be time-sensitive or outside your training data
 6. When showing code, include the full file content
+7. Always write clean, readable, well-formatted code with correct, consistent indentation (4 spaces per level), blank lines between definitions, and proper spacing around operators
+8. Output code as a single-line JSON string with escaped newlines (\\n), never raw newlines inside JSON string values
 
 Think step-by-step:
 1. Analyze the request
@@ -242,7 +352,7 @@ Respond ONLY with tool calls or final answers."""
                             },
                             "content": {
                                 "type": "string",
-                                "description": "Content to write to the file"
+                                "description": "Clean, well-formatted, properly indented code to write to the file"
                             }
                         },
                         "required": ["path", "content"]
@@ -359,8 +469,14 @@ Respond ONLY with tool calls or final answers."""
         try:
             file_path = (self.current_directory / path).resolve()
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content, encoding='utf-8')
-            return f"{Fore.GREEN}✅ Successfully created file {path}. The file now contains {len(content)} characters.{Style.RESET_ALL}"
+            # Normalize line endings and ensure trailing newline
+            text = content
+            # Fix common indentation issues if content came with mixed tabs/spaces
+            # Ensure consistent newline at end
+            if not text.endswith('\n'):
+                text = text + '\n'
+            file_path.write_text(text, encoding='utf-8')
+            return f"{Fore.GREEN}✅ Successfully created file {path}. The file now contains {len(text)} characters.{Style.RESET_ALL}"
         except Exception as e:
             return f"{Fore.RED}Error writing to file {path}: {str(e)}{Style.RESET_ALL}"
     
@@ -405,7 +521,10 @@ Respond ONLY with tool calls or final answers."""
         """Run a shell command."""
         try:
             # Limit commands for security
-            allowed_commands = ['ls', 'dir', 'find', 'grep', 'cat', 'head', 'tail', 'wc', 'echo']
+            allowed_commands = [
+                'ls', 'dir', 'find', 'grep', 'cat', 'head', 'tail', 'wc', 'echo',
+                'python', 'python3', 'pip', 'pip3', 'pytest', 'pwd', 'mkdir', 'touch'
+            ]
             
             cmd_parts = cmd.split()
             if not cmd_parts or cmd_parts[0] not in allowed_commands:
@@ -474,7 +593,7 @@ Respond ONLY with tool calls or final answers."""
 
 
 @click.command()
-@click.option("--model", default="qwen3:32b", help="The Ollama model to use.")
+@click.option("--model", default="qwen2.5-coder:3b", help="The Ollama model to use.")
 @click.option("--debug", is_flag=True, help="Enable debug mode.")
 def main(model: str, debug: bool):
     """Run the Coding Agent."""
