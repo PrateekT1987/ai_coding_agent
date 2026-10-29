@@ -20,14 +20,14 @@ import time
 import hashlib
 
 import secure_agent as sa
+import llm_config
 
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", llm_config.EMBED_MODEL)
 INDEX_PATH = os.path.abspath(os.path.expanduser(
     os.environ.get("CODEBASE_INDEX_PATH", "~/.cache/local-cursor/codebase_index.json")
 ))
 CHUNK_LINES = int(os.environ.get("INDEX_CHUNK_LINES", "40"))
 CHUNK_OVERLAP = int(os.environ.get("INDEX_CHUNK_OVERLAP", "10"))
-EMBED_BATCH = int(os.environ.get("INDEX_EMBED_BATCH", "32"))
 SKIP_DIRS = {
     "__pycache__", ".git", ".pytest_cache", ".venv", "venv",
     "node_modules", ".mypy_cache", ".ruff_cache",
@@ -114,12 +114,8 @@ class CodebaseIndex:
         return chunks
 
     def _embed(self, texts):
-        vectors = []
-        for i in range(0, len(texts), EMBED_BATCH):
-            batch = texts[i:i + EMBED_BATCH]
-            resp = sa.client.embeddings.create(model=self.model, input=batch)
-            vectors.extend(_normalize(d.embedding) for d in resp.data)
-        return vectors
+        vectors = llm_config.embed_texts(texts, model=self.model)
+        return [_normalize(v) for v in vectors]
 
     # -- build -------------------------------------------------------------- #
     def build(self, force: bool = False) -> dict:
@@ -197,7 +193,7 @@ class CodebaseIndex:
 
 
 def _embed_query(index: CodebaseIndex, query: str):
-    return _normalize(sa.client.embeddings.create(model=index.model, input=[query]).data[0].embedding)
+    return _normalize(llm_config.embed_texts([query], model=index.model)[0])
 
 
 def format_results(results) -> str:

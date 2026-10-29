@@ -25,8 +25,6 @@ import subprocess
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from openai import OpenAI
-
 from rich.live import Live
 from rich.layout import Layout
 from rich.panel import Panel
@@ -36,10 +34,11 @@ from rich.console import Console
 from rich.markup import escape
 
 import secure_agent as sa
+import llm_config
 import codebase_index
 import local_rag
 
-MODEL_NAME = os.environ.get("AGENT_MODEL", sa.MODEL_NAME)
+MODEL_NAME = sa.MODEL_NAME
 WORKSPACE_DIR = sa.WORKSPACE_DIR
 LAST_GOOD_TAG = "last_good"
 MAX_STEPS = sa.MAX_STEPS
@@ -597,16 +596,16 @@ def agent_orchestrator(prompt: str, max_steps: int = MAX_STEPS):
 
     for step in range(max_steps):
         log_to_ui(f"🧠 Step {step + 1}: querying model")
-        response = sa.client.chat.completions.create(
+        response = llm_config.chat_completion(
+            messages,
             model=MODEL_NAME,
-            messages=messages,
             tools=tools_definition,
             tool_choice="auto",
             temperature=0.1,
             max_tokens=sa.LLM_MAX_TOKENS,
         )
         message = response.choices[0].message
-        messages.append(message.model_dump(exclude_none=True))
+        messages.append(llm_config.assistant_message(message))
 
         native = message.tool_calls or []
         if native:

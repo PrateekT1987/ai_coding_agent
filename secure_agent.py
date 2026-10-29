@@ -12,13 +12,13 @@ import json
 import shlex
 import tempfile
 import subprocess
-from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:11434/v1/", api_key="ollama",
-                timeout=float(os.environ.get("AGENT_LLM_TIMEOUT", "300")))
-MODEL_NAME = "qwen2.5-coder:3b"
-# Cap generation so a looping model cannot hang the graph; CPU inference is slow.
-LLM_MAX_TOKENS = int(os.environ.get("AGENT_LLM_MAX_TOKENS", "1024"))
+import llm_config
+
+client = llm_config.client
+MODEL_NAME = llm_config.MODEL_NAME
+# Cap generation so a looping model cannot hang the graph.
+LLM_MAX_TOKENS = llm_config.LLM_MAX_TOKENS
 WORKSPACE_DIR = os.path.abspath(os.path.expanduser("~/data/pt87/ai_coding/agent_workspace"))
 DOCKER = os.environ.get("DOCKER_CMD", "docker").split()
 
@@ -588,10 +588,9 @@ def _repair_json_strings(text: str) -> str:
 def parse_text_tool_calls(content: str):
     """Parse tool calls that the model emitted as JSON text.
 
-    qwen2.5-coder:3b ships without an Ollama tool template, so it returns
-    tool calls as JSON inside the message content rather than native
-    `tool_calls`. A single message may contain several concatenated JSON
-    objects, so scan for all of them.
+    Some models emit tool calls as JSON text inside the message content
+    rather than through native `tool_calls`. A single message may contain
+    several concatenated JSON objects, so scan for all of them.
 
     Returns a list of ``(name, arguments)`` tuples.
     """
@@ -692,9 +691,9 @@ def run_secure_agent(user_prompt: str):
     for step in range(MAX_STEPS):
         print(f"\n--- Processing Step {step + 1} ---")
 
-        response = client.chat.completions.create(
+        response = llm_config.chat_completion(
+            messages,
             model=MODEL_NAME,
-            messages=messages,
             tools=tools_definition,
             tool_choice="auto",
             temperature=0.2,
@@ -702,7 +701,7 @@ def run_secure_agent(user_prompt: str):
         )
 
         response_message = response.choices[0].message
-        messages.append(response_message.model_dump(exclude_none=True))
+        messages.append(llm_config.assistant_message(response_message))
 
         tool_calls = response_message.tool_calls or []
         text_calls = []

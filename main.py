@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-AI agent with integrated tools using Ollama.
+AI agent with integrated tools using the LLM configured in ``.env``.
+
+Provider, model, retries and timeouts all come from :mod:`llm_config`.
 """
 
 import os
@@ -11,18 +13,18 @@ import click
 import pathlib
 import subprocess
 import threading
-import dotenv
 import requests
 from typing import Dict, List, Any
 from colorama import Fore, Style, init
-from openai import OpenAI
+
+import llm_config
 
 
 # Initialize colorama
 init(autoreset=True)
 
-# Load environment variables
-dotenv.load_dotenv()
+# Timeout for web-search HTTP calls (separate from the LLM timeout).
+WEB_SEARCH_TIMEOUT = int(os.environ.get("WEB_SEARCH_TIMEOUT", "30"))
 
 class Spinner:
     """Spinner animation to show loading state."""
@@ -59,14 +61,11 @@ class Spinner:
 
 class CodingAgent:
 
-    def __init__(self, model: str = "qwen2.5-coder:3b", debug: bool = False):
+    def __init__(self, model: str = llm_config.MODEL_NAME, debug: bool = False):
         """Initialize the agent."""
-        self.model = model
+        self.model = model or llm_config.MODEL_NAME
 
-        self.client = OpenAI(
-            base_url='http://localhost:11434/v1/',
-            api_key='ollama',
-        )
+        self.client = llm_config.client
         self.messages = []
         self.spinner = Spinner()
         self.current_directory = pathlib.Path.cwd()
@@ -135,7 +134,7 @@ class CodingAgent:
             message_content = response_message.content or ""
             
             # Add to messages history
-            self.messages.append(response_message.model_dump())
+            self.messages.append(llm_config.assistant_message(response_message))
             
             # Check for native tool calls
             if hasattr(response_message, 'tool_calls') and response_message.tool_calls:
@@ -167,8 +166,8 @@ class CodingAgent:
                 # Continue the conversation to get the final response
                 continue
             
-            # Some models (e.g. qwen2.5-coder:3b) emit tool calls as JSON text
-            # inside the message content instead of native tool_calls. Parse those.
+            # Some models emit tool calls as JSON text inside the message
+            # content instead of native tool_calls. Parse those.
             parsed_tool_call = self.parse_text_tool_call(message_content)
             if parsed_tool_call:
                 function_name, function_args = parsed_tool_call
@@ -300,26 +299,28 @@ Think step-by-step:
 Respond ONLY with tool calls or final answers."""
     
     def chat(self, messages):
-        """Send a chat request to the Ollam API."""
+        """Send a chat request to the configured LLM."""
         tools = self.get_tools_definition()
-        
+
         if self.debug:
-            print(f"\n{Fore.YELLOW}DEBUG - Sending {len(messages)} messages to Ollama API")
-            
-        response = self.client.chat.completions.create(
+            print(f"\n{Fore.YELLOW}DEBUG - Sending {len(messages)} messages to "
+                  f"{llm_config.image_of(self.model)}")
+
+        response = llm_config.chat_completion(
+            messages,
             model=self.model,
-            messages=messages,
             tools=tools,
-            tool_choice="auto"
+            tool_choice="auto",
         )
-        
+
         if self.debug:
-            print(f"\n{Fore.YELLOW}DEBUG - Received response from Ollama API")
-            
+            print(f"\n{Fore.YELLOW}DEBUG - Received response from "
+                  f"{llm_config.image_of(self.model)}")
+
         return response
     
     def get_tools_definition(self) -> List[Dict[str, Any]]:
-        """Define tools in the format expected by the Ollama API."""
+        """Define tools in the format expected by the OpenAI-compatible API."""
         tools = [
             {
                 "type": "function",
@@ -549,51 +550,93 @@ Respond ONLY with tool calls or final answers."""
             return f"{Fore.RED}Error executing command '{cmd}': {str(e)}{Style.RESET_ALL}"
     
     def web_search(self, query: str, num_results: int = 5) -> str:
-        """Search the web using Exa API."""
-        try:
-            api_key = os.environ.get("EXA_API_KEY")
-            
-            if not api_key:
-                return "Error: Exa API key not configured."
-            
-            # Exa API endpoint
-            url = "https://api.exa.ai/search"
-            headers = {"Content-Type": "application/json", "x-api-key": api_key}
-            data = {"query": query, "num_results": int(num_results), "use_autoprompt": True}
-            
-            # Make the request
-            response = requests.post(url, headers=headers, json=data)
-            
-            if response.status_code != 200:
-                return f"Error: Exa API returned status code {response.status_code}"
-            
-            # Parse the results
-            search_results = response.json()
-            
-            if "results" not in search_results or not search_results["results"]:
-                return f"No results found for query: '{query}'"
-            
-            # Format the results
-            formatted_results = f"Search results for '{query}':\n\n"
-            for i, item in enumerate(search_results["results"], 1):
-                title = item.get("title", "No title")
-                url = item.get("url", "No link")
-                text = item.get("text", "")
-                snippet = text[:150] + "..." if len(text) > 150 else text
-                
-                formatted_results += f"{i}. {title}\n"
-                formatted_results += f"   URL: {url}\n"
-                formatted_results += f"   Description: {snippet}\n\n"
-            
-            return formatted_results
-            
-        except Exception as e:
-            return f"Error executing web search: {str(e)}"
+        """Search the web, preferring Tavily and falling back to Exa."""
+        num_results = max(1, min(int(num_results), 10))
+        tavily_key = os.environ.get("TAVILY_API_KEY", "").strip()
+        exa_key = os.environ.get("EXA_API_KEY", "").strip()
+
+        if not tavily_key and not exa_key:
+            return ("Error: no web search API key configured. "
+                    "Set TAVILY_API_KEY or EXA_API_KEY.")
+
+        errors = []
+        if tavily_key:
+            try:
+                return self._web_search_tavily(query, num_results, tavily_key)
+            except Exception as exc:  # noqa: BLE001 - fall through to Exa
+                errors.append(f"Tavily: {exc}")
+                if not exa_key:
+                    return f"Error executing web search: {errors[-1]}"
+
+        if exa_key:
+            try:
+                return self._web_search_exa(query, num_results, exa_key)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Exa: {exc}")
+
+        return "Error executing web search: " + "; ".join(errors)
+
+    @staticmethod
+    def _format_search_results(query: str, results: List[Dict[str, Any]]) -> str:
+        if not results:
+            return f"No results found for query: '{query}'"
+        formatted = f"Search results for '{query}':\n\n"
+        for i, item in enumerate(results, 1):
+            title = item.get("title") or "No title"
+            link = item.get("url") or "No link"
+            text = item.get("content") or ""
+            snippet = text[:400] + "..." if len(text) > 400 else text
+            formatted += f"{i}. {title}\n   URL: {link}\n   Description: {snippet}\n\n"
+        return formatted.rstrip()
+
+    def _web_search_tavily(self, query: str, num_results: int, api_key: str) -> str:
+        response = requests.post(
+            "https://api.tavily.com/search",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            json={
+                "query": query,
+                "max_results": num_results,
+                "search_depth": "basic",
+                "include_answer": False,
+            },
+            timeout=WEB_SEARCH_TIMEOUT,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"HTTP {response.status_code}: {response.text[:200]}"
+            )
+        return self._format_search_results(query, response.json().get("results", []))
+
+    def _web_search_exa(self, query: str, num_results: int, api_key: str) -> str:
+        response = requests.post(
+            "https://api.exa.ai/search",
+            headers={"Content-Type": "application/json", "x-api-key": api_key},
+            json={"query": query, "num_results": num_results, "use_autoprompt": True},
+            timeout=WEB_SEARCH_TIMEOUT,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"HTTP {response.status_code}: {response.text[:200]}"
+            )
+        results = [
+            {"title": item.get("title"), "url": item.get("url"),
+             "content": item.get("text", "")}
+            for item in response.json().get("results", [])
+        ]
+        return self._format_search_results(query, results)
     
 
 
 @click.command()
-@click.option("--model", default="qwen2.5-coder:3b", help="The Ollama model to use.")
+@click.option(
+    "--model",
+    default=llm_config.MODEL_NAME,
+    show_default=True,
+    help="Model to use (defaults to the one configured in .env).",
+)
 @click.option("--debug", is_flag=True, help="Enable debug mode.")
 def main(model: str, debug: bool):
     """Run the Coding Agent."""

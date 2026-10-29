@@ -1,8 +1,11 @@
 # Local Cursor
 
-> **Privacy‑first AI coding assistant that lives entirely in your terminal. No clouds, no compromises.**
+> **A production-grade AI coding assistant that lives in your terminal — bring any OpenAI-compatible model.**
 
-Local Cursor wraps a local large‑language‑model (LLM) served by [Ollama](https://ollama.ai/) in a simple CLI, giving you Copilot‑style help without ever sending a byte of your code to external servers.
+Local Cursor wraps an LLM of your choice in a simple CLI and a set of autonomous
+sandboxed agents. All model wiring is centralised in `llm_config.py` and driven
+by `.env`: point it at OpenRouter, OpenAI, a local [Ollama](https://ollama.ai/)
+server, or any OpenAI-compatible endpoint.
 
 
 ## Key features
@@ -11,8 +14,8 @@ Local Cursor wraps a local large‑language‑model (LLM) served by [Ollama](htt
 | --------------- | ---------------------------------------------------------------------- |
 | File tooling    | Read, write, list & search files via natural‑language requests        |
 | Shell commands  | Safely run whitelisted commands (`ls`, `grep`, `find`, …)             |
-| Web search      | Optional Exa API integration for up‑to‑date answers                   |
-| Local LLM       | Ships with **`qwen2.5-coder:3b`** by default—swap in any Ollama model |
+| Web search      | Tavily (preferred) with Exa fallback for up‑to‑date answers            |
+| Any LLM         | OpenRouter / OpenAI / Ollama / custom OpenAI‑compatible endpoint       |
 | Sandboxed exec  | All code runs in an ephemeral, resource‑capped Docker container (no network at run time) |
 | Test‑driven     | Writes its own `test_*.py` suite and iterates on `pytest` until green |
 | Git checkpoints | Every change is snapshotted; passing work is committed and tagged `last_good`, failures roll back |
@@ -27,16 +30,19 @@ Local Cursor wraps a local large‑language‑model (LLM) served by [Ollama](htt
 
 ### 1 · Prerequisites
 
-* **Python ≥ 3.8**
-* **Ollama** running locally (`brew install ollama` or see the [docs](https://ollama.ai/))
-* *(Optional)* Exa API key for web search
+* **Python ≥ 3.8**
+* An LLM endpoint: an OpenRouter / OpenAI API key, or a local Ollama server
+* *(Optional)* Tavily or Exa API key for web search
+* *(Optional)* Docker for the sandboxed agents
+* *(Optional)* A local Ollama server if you want semantic search
+  (`EMBEDDINGS_PROVIDER=ollama`, the default)
 
 ### 2 · Install & run
 
 ```bash
 # Clone and enter the repo
-git clone https://github.com/towardsai/local-cursor.git
-cd local‑cursor
+git clone https://github.com/PrateekT1987/ai_coding_agent.git
+cd ai_coding_agent
 
 # Set up a virtualenv
 python -m venv .venv && source .venv/bin/activate
@@ -44,16 +50,19 @@ python -m venv .venv && source .venv/bin/activate
 # Install Python deps (or: uv venv && uv pip install -r requirements.txt)
 pip install -r requirements.txt
 
-# Pull a model & start Ollama
-ollama pull qwen2.5-coder:3b
-ollama serve      # keep this terminal running
+# Configure the model + keys
+cp .env.example .env
+# edit .env -> LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL, ...
 
-# (Optional) add your Exa key
-echo "EXA_API_KEY=sk‑..." > .env
+# Check connectivity without spending much
+python -m llm_config --check
 
-# Fire up the assistant
-python main.py --model qwen2.5-coder:3b
+# Fire up the assistant (uses the model from .env)
+python main.py
 ```
+
+To use a local model instead, set `LLM_PROVIDER=ollama` in `.env` and pull a
+model: `ollama pull qwen2.5-coder:3b`.
 
 *Tip →* run `python main.py --help` for all CLI flags (debug mode, model override, …).
 
@@ -61,12 +70,15 @@ python main.py --model qwen2.5-coder:3b
 ## How it works
 ![Architecture](https://github-production-user-asset-6210df.s3.amazonaws.com/209818798/440162845-5d8e3b21-2095-41f6-b1db-e0c6c047958f.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20250504%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20250504T053828Z&X-Amz-Expires=300&X-Amz-Signature=7a44b959a613474452f0e24e21d884f080f7e78438a8e5c39aa2c8ff054c7ca7&X-Amz-SignedHeaders=host)
 
-1. Natural language input from the terminal is sent to the model, along with a system prompt that lists the available tools.
-2. The local LLM (via Ollama) analyzes the request and responds with either a plain-text answer or a structured tool call.
-3. If a tool call is issued, the OllamaAgent executes the corresponding function (e.g., read/write a file, run a shell command) and sends the result back to the model.
+1. Natural language input from the terminal is sent to the configured model, along with a system prompt that lists the available tools.
+2. The model analyzes the request and responds with either a plain-text answer or a structured tool call.
+3. If a tool call is issued, the agent executes the corresponding function (e.g., read/write a file, run a shell command) and sends the result back to the model.
 4. This loop continues until the model produces a final answer, which is then printed in your terminal.
 
-All logic is in [`main.py`](./main.py); the heavy lifting is done by the open‑source model running locally.
+All model access goes through [`llm_config.py`](./llm_config.py), which handles
+provider selection, timeouts, bounded retries with exponential backoff, and
+cleaning provider-specific fields off assistant messages before replaying them.
+`main.py` contains the interactive CLI and tool loop.
 
 ### Sandboxed agents
 
@@ -154,9 +166,10 @@ python watch_workspace.py                                          # lightweight
 - **Multi-File Indexing Scanner** – `scan_codebase_index` walks the workspace
   and returns a structured map (path · lines · chars), then builds/refreshes a
   semantic embedding index. Raw content is retrieved on demand with
-  `search_codebase(query, top_k)`, which embeds the query using Ollama's
-  `nomic-embed-text` and returns the most relevant code sections (path + line
-  range + code). The index is cached at `~/.cache/local-cursor/codebase_index.json`
+  `search_codebase(query, top_k)`, which embeds the query with the configured
+embeddings backend (default: Ollama's `nomic-embed-text`) and returns the most
+relevant code sections (path + line
+range + code). The index is cached at `~/.cache/local-cursor/codebase_index.json`
   and only re-embeds files whose content hash changed, so the context window
   stays bounded even for large projects.
 
@@ -178,8 +191,11 @@ Design notes:
 - Rollback is reserved for **repeated identical failures**, not every failed
   run — otherwise the agent could never iterate on a fix. Tune the threshold with
   `AGENT_UNRECOVERABLE_LIMIT`.
-- The model defaults to `qwen2.5-coder:3b` (what is installed). To use 7b:
-  `ollama pull qwen2.5-coder:7b` then `AGENT_MODEL=qwen2.5-coder:7b python advanced_dev_agent.py`.
+- The model is whatever `.env` specifies (`LLM_PROVIDER` + provider model, or
+  `AGENT_MODEL` to override). For a local model: `ollama pull qwen2.5-coder:7b`
+  then `LLM_PROVIDER=ollama OLLAMA_MODEL=qwen2.5-coder:7b python advanced_dev_agent.py`.
+- Semantic search uses `EMBEDDINGS_PROVIDER` (default `ollama` with
+  `nomic-embed-text`); set it to `none` if no embedding server is available.
 - The workspace is a Git repo (initialized with a baseline commit + `.gitignore`);
   inspect history with `git -C ~/data/pt87/ai_coding/agent_workspace log --oneline --decorate`.
 
@@ -192,8 +208,9 @@ into the docs pool (default `~/data/pt87/ai_coding/local_docs`, override with
 `DOCS_DIR`) and the `search_docs(query, top_k)` tool retrieves the most relevant
 sections.
 
-It reuses the same lightweight stack as the codebase index — Ollama
-`nomic-embed-text` embeddings + cosine similarity over a cached, incrementally
+It reuses the same lightweight stack as the codebase index — configurable
+embeddings (default Ollama `nomic-embed-text`) + cosine similarity over a cached,
+incrementally
 built index (`~/.cache/local-cursor/docs_index.json`) — so no ChromaDB/FAISS
 dependency is needed. On first run the pool is seeded with a README and a
 `python-stdlib.md` cheatsheet.
@@ -209,7 +226,7 @@ python local_rag.py search "requests.Session retries" -k 3
 ## Multi-agent graph: Developer ↔ Reviewer
 
 `multi_agent_graph.py` runs two agents with **separate system contexts** on the
-same local model, wired as a graph:
+same configured model, wired as a graph:
 
 ```
 develop → format → lint → test → review ─┬─ approve → commit
@@ -281,12 +298,27 @@ Every knob is overridable via environment variables (nothing needs editing).
 
 | Variable                              | Default                              | Purpose                                              |
 | ------------------------------------- | ------------------------------------ | ---------------------------------------------------- |
-| `AGENT_MODEL`                         | `qwen2.5-coder:3b`                   | Chat model for the agents                            |
+| `LLM_PROVIDER`                        | `openrouter`                         | `openrouter` / `openai` / `ollama` / `custom`        |
+| `OPENROUTER_API_KEY`                  | —                                    | OpenRouter API key                                   |
+| `OPENROUTER_BASE_URL`                 | `https://openrouter.ai/api/v1`       | OpenRouter API base                                  |
+| `OPENROUTER_MODEL`                    | `nvidia/nemotron-3-ultra-550b-a55b:free` | OpenRouter model                                 |
+| `OPENAI_API_KEY` / `OPENAI_MODEL`     | — / `gpt-4o-mini`                    | OpenAI provider settings                             |
+| `OLLAMA_BASE_URL` / `OLLAMA_MODEL`    | `http://localhost:11434/v1` / `qwen2.5-coder:3b` | Local Ollama chat provider              |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | —                             | Generic OpenAI-compatible endpoint                   |
+| `AGENT_MODEL`                         | provider default                     | Global chat model override                           |
+| `AGENT_LLM_MAX_TOKENS`                | `4096`                               | Max completion tokens (keep high for reasoning models) |
+| `AGENT_LLM_TIMEOUT`                   | `300`                                | Per-request timeout (s)                              |
+| `LLM_TEMPERATURE`                     | `0`                                  | Sampling temperature                                 |
+| `LLM_MAX_RETRIES`                     | `4`                                  | Attempts for transient LLM failures                  |
+| `LLM_RETRY_BASE_SECONDS`              | `2`                                  | Base delay for exponential backoff                   |
+| `TAVILY_API_KEY` / `EXA_API_KEY`      | —                                    | Web search keys (Tavily preferred)                   |
+| `WEB_SEARCH_TIMEOUT`                  | `30`                                 | Web-search HTTP timeout (s)                          |
+| `EMBEDDINGS_PROVIDER`                 | `ollama`                             | `ollama` / `openai` / `custom` / `none`              |
+| `EMBED_MODEL`                         | `nomic-embed-text`                   | Embedding model for codebase/docs indexes            |
 | `AGENT_MAX_STEPS`                     | `30`                                 | Max tool steps per `secure_agent.py` run             |
 | `AGENT_UNRECOVERABLE_LIMIT`           | `3`                                  | Repeated failures before the advanced agent rolls back |
 | `AGENT_MAX_REVISIONS`                 | `2`                                  | Reviewer revise rounds before the graph rolls back   |
 | `AGENT_DEV_MAX_STEPS`                 | `8`                                  | Max Developer tool steps per revision                |
-| `EMBED_MODEL`                         | `nomic-embed-text`                   | Embedding model for codebase/docs indexes            |
 | `SANDBOX_IMAGE`                       | `local-agent-sandbox:latest`         | Sandbox Docker image name                            |
 | `SANDBOX_BASE` / `SANDBOX_PACKAGES`   | `python:3.11-slim` / numpy…pytest    | Auto‑build inputs for the sandbox image              |
 | `SANDBOX_AUTOBUILD`                   | `1`                                  | Auto‑build the sandbox image on first run            |
@@ -302,9 +334,10 @@ Every knob is overridable via environment variables (nothing needs editing).
 | `DOCS_DIR`                            | `~/data/pt87/ai_coding/local_docs`   | Docs pool for `search_docs`                          |
 | `DOCKER_CMD`                          | `docker`                             | Docker binary (e.g. `podman`)                        |
 
-> **Note** — the local Ollama server typically serves **one model at a time**
-> (`-np 1`). A long‑running or stuck agent process blocks every other request, so
-> make sure only one agent is running before starting another.
+> **Note** — when `LLM_PROVIDER=ollama` (or embeddings use Ollama), the local
+> server typically serves **one model at a time** (`-np 1`). A long‑running or
+> stuck agent process blocks other local requests, so make sure only one agent
+> is running before starting another. Remote providers are not affected.
 
 
 ## Python dependencies
@@ -312,11 +345,11 @@ Every knob is overridable via environment variables (nothing needs editing).
 Local Cursor keeps its runtime lean:
 
 ```text
-requests       # To make EXA API calls
+requests       # HTTP calls (web search, APIs)
 click          # To write CLI
 colorama       # To format CLI output
-openai         # To create an OpenAI client
-python‑dotenv  # To load environment variables from our .env file
+openai         # OpenAI-compatible client for any provider
+python-dotenv  # To load environment variables from our .env file
 rich           # Live dashboards for the sandboxed agents & monitor
 fastapi        # Local web console API
 uvicorn        # ASGI server for the web console
@@ -340,10 +373,14 @@ uvicorn        # ASGI server for the web console
 
 | Symptom                                      | Fix                                                        |
 | -------------------------------------------- | ---------------------------------------------------------- |
-| `Error: Exa API key not configured`          | Add `EXA_API_KEY` to `.env` or disable web search          |
+| `No API key configured for provider …`       | Add the matching key to `.env` (see `.env.example`)        |
+| `LLM request failed (401/403)`               | The API key is invalid or lacks access to the model        |
+| `Transient RateLimitError … retrying`        | Normal backoff; raise `LLM_MAX_RETRIES` for long runs      |
+| `Error: no web search API key configured`    | Add `TAVILY_API_KEY` or `EXA_API_KEY` to `.env`            |
 | `command … not allowed for security reasons` | Add it to `allowed_commands` (understand the risks first!) |
-| High memory usage                            | Try a smaller Ollama model like `qwen2.5-coder:1.5b`       |
-| Model calls take minutes / hang              | A stray agent process may hold the single Ollama slot (`-np 1`); kill other `python*agent*.py` runs |
+| `[Semantic search failed: …]`                | Start Ollama with `nomic-embed-text`, or set `EMBEDDINGS_PROVIDER=none` |
+| High memory usage                            | Use a smaller local model or a remote provider             |
+| Model calls take minutes / hang              | Increase `AGENT_LLM_TIMEOUT`; for local Ollama, kill stray `python*agent*.py` runs |
 | `Sandbox image '…' not found`                | Keep `SANDBOX_AUTOBUILD=1`, or point `DOCKER_CMD` at a working Docker/Podman |
 | `black`/`flake8` missing in the sandbox      | They install on the first multi‑agent run via `install_dependencies` |
 

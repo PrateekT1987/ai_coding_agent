@@ -2,7 +2,7 @@
 """
 Multi-Agent Graph: Developer ↔ Code-Reviewer with automatic format + lint.
 
-Two agents share the same local model (`qwen2.5-coder:3b`) but run in separate
+Two agents share the same configured model (see `llm_config`) but run in separate
 system contexts:
 
   * Developer Agent  — turns the task (+ any reviewer feedback) into source
@@ -34,9 +34,10 @@ from rich.markup import escape
 
 import secure_agent as sa
 import advanced_dev_agent as ada
+import llm_config
 import web_state
 
-MODEL_NAME = os.environ.get("AGENT_MODEL", sa.MODEL_NAME)
+MODEL_NAME = llm_config.MODEL_NAME
 MAX_REVISIONS = int(os.environ.get("AGENT_MAX_REVISIONS", "2"))
 DEV_MAX_STEPS = int(os.environ.get("AGENT_DEV_MAX_STEPS", "8"))
 FLAKE8_MAX_LINE = int(os.environ.get("FLAKE8_MAX_LINE", "100"))
@@ -232,12 +233,13 @@ def developer_node(task: str, feedback: str) -> None:
         log_to_ui(f"👨\u200d💻 Dev step {step + 1}: thinking")
         web_state.POOL.bump("dev_steps")
         web_state.POOL.emit("dev_step", step=step + 1, budget=DEV_MAX_STEPS)
-        resp = sa.client.chat.completions.create(
-            model=MODEL_NAME, messages=messages, tools=DEV_TOOLS,
+        resp = llm_config.chat_completion(
+            messages,
+            model=MODEL_NAME, tools=DEV_TOOLS,
             tool_choice="auto", temperature=0.1, max_tokens=sa.LLM_MAX_TOKENS,
         )
         message = resp.choices[0].message
-        messages.append(message.model_dump(exclude_none=True))
+        messages.append(llm_config.assistant_message(message))
 
         native = message.tool_calls or []
         if native:
@@ -352,10 +354,10 @@ def reviewer_node(task: str, format_note: str, lint_ok: bool, lint_out: str,
         f"pytest: {'passed' if test_ok else 'failed'}. Comparing sources against the task.",
         phase="reviewing", revision=_revision["n"],
     )
-    resp = sa.client.chat.completions.create(
+    resp = llm_config.chat_completion(
+        [{"role": "system", "content": REVIEW_SYSTEM},
+         {"role": "user", "content": payload}],
         model=MODEL_NAME,
-        messages=[{"role": "system", "content": REVIEW_SYSTEM},
-                  {"role": "user", "content": payload}],
         temperature=0.0, max_tokens=sa.LLM_MAX_TOKENS,
     )
     verdict, feedback = _parse_verdict(resp.choices[0].message.content)
